@@ -48,22 +48,24 @@ class PatchEmbed(nn.Module):
         super().__init__()
         img_size = (img_size, img_size)
         patch_size = (patch_size, patch_size)
-        self.img_size = img_size
-        self.patch_size = patch_size
-        self.grid_size = (img_size[0] // patch_size[0], img_size[1] // patch_size[1])
-        self.num_patches = self.grid_size[0] * self.grid_size[1]
+        self.img_size = img_size   #224*224
+        self.patch_size = patch_size #16*16
+        self.grid_size = (img_size[0] // patch_size[0], img_size[1] // patch_size[1]) #14*14
+        self.num_patches = self.grid_size[0] * self.grid_size[1] #14*14=196
 
         self.proj = nn.Conv2d(in_c, embed_dim, kernel_size=patch_size, stride=patch_size)
         self.norm = norm_layer(embed_dim) if norm_layer else nn.Identity()
 
     def forward(self, x):
         B, C, H, W = x.shape
+        #做判断，若输入图片大小与预先设定不一样，报错
         assert H == self.img_size[0] and W == self.img_size[1], \
             f"Input image size ({H}*{W}) doesn't match model ({self.img_size[0]}*{self.img_size[1]})."
 
         # flatten: [B, C, H, W] -> [B, C, HW]
         # transpose: [B, C, HW] -> [B, HW, C]
-        x = self.proj(x).flatten(2).transpose(1, 2)
+        x = self.proj(x).flatten(2).transpose(1, 2) #展平是从第二个温度开始的即从[B, C, H, W]中的H开始，
+        #然后通过transpose(1,2)将维度1和2上的数据进行调换。
         x = self.norm(x)
         return x
 
@@ -86,7 +88,7 @@ class Attention(nn.Module):
         self.proj_drop = nn.Dropout(proj_drop_ratio)
 
     def forward(self, x):
-        # [batch_size, num_patches + 1, total_embed_dim]
+        # [batch_size, num_patches + 1, total_embed_dim]=[batch_size,197,768]
         B, N, C = x.shape
 
         # qkv(): -> [batch_size, num_patches + 1, 3 * total_embed_dim]
@@ -96,15 +98,15 @@ class Attention(nn.Module):
         # [batch_size, num_heads, num_patches + 1, embed_dim_per_head]
         q, k, v = qkv[0], qkv[1], qkv[2]  # make torchscript happy (cannot use tensor as tuple)
 
-        # transpose: -> [batch_size, num_heads, embed_dim_per_head, num_patches + 1]
+        # transpose: -> [batch_size, num_heads, embed_dim_per_head, num_patches + 1]，将最后两个维度调换
         # @: multiply -> [batch_size, num_heads, num_patches + 1, num_patches + 1]
         attn = (q @ k.transpose(-2, -1)) * self.scale
-        attn = attn.softmax(dim=-1)
+        attn = attn.softmax(dim=-1) #dim=-1即在每行上进行softmax处理
         attn = self.attn_drop(attn)
 
         # @: multiply -> [batch_size, num_heads, num_patches + 1, embed_dim_per_head]
         # transpose: -> [batch_size, num_patches + 1, num_heads, embed_dim_per_head]
-        # reshape: -> [batch_size, num_patches + 1, total_embed_dim]
+        # reshape: -> [batch_size, num_patches + 1, total_embed_dim]，将最后两个维度的信息进行拼接
         x = (attn @ v).transpose(1, 2).reshape(B, N, C)
         x = self.proj(x)
         x = self.proj_drop(x)
@@ -162,6 +164,7 @@ class Block(nn.Module):
 
 
 class VisionTransformer(nn.Module):
+    # representation_size=None是MLP head中pre-logits中全连接层结点个数。此时为None，则不会构建pre-logits
     def __init__(self, img_size=224, patch_size=16, in_c=3, num_classes=1000,
                  embed_dim=768, depth=12, num_heads=12, mlp_ratio=4.0, qkv_bias=True,
                  qk_scale=None, representation_size=None, distilled=False, drop_ratio=0.,
@@ -201,7 +204,7 @@ class VisionTransformer(nn.Module):
         self.dist_token = nn.Parameter(torch.zeros(1, 1, embed_dim)) if distilled else None
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + self.num_tokens, embed_dim))
         self.pos_drop = nn.Dropout(p=drop_ratio)
-
+          #encoder中的dropout是一个递增的序列dpr
         dpr = [x.item() for x in torch.linspace(0, drop_path_ratio, depth)]  # stochastic depth decay rule
         self.blocks = nn.Sequential(*[
             Block(dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, qk_scale=qk_scale,
